@@ -4,7 +4,7 @@ import time
 import uuid
 import jwt
 from jwt import InvalidTokenError, InvalidKeyError
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 import os
@@ -113,6 +113,62 @@ async def unified_middleware(request: Request, call_next):
             response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
 
     return response
+
+
+TOTAL_ORDERS = 50
+RATE_LIMIT = 20
+WINDOW_SECONDS = 10
+
+# In-memory stores (fine since "stateless" isn't required here)
+idempotency_store: dict[str, dict] = {}
+client_buckets: dict[str, list[float]] = defaultdict(list)
+
+@app.post("/orders")
+def create_order(idempotency_key: str = Header(None, alias="Idempotency-Key")):
+    if idempotency_key and idempotency_key in idempotency_store:
+        # Same key seen before -> return the SAME order, no duplicate
+        return JSONResponse(status_code=201, content=idempotency_store[idempotency_key])
+
+    order = {"id": str(uuid.uuid4()), "status": "created"}
+    if idempotency_key:
+        idempotency_store[idempotency_key] = order
+
+    return JSONResponse(status_code=201, content=order)
+
+
+@app.get("/orders")
+def list_orders(limit: int = 10, cursor: str = None):
+    # cursor = string form of the next starting ID (1-indexed)
+    start = int(cursor) if cursor else 1
+    end = min(start + limit, TOTAL_ORDERS + 1)
+
+    items = [{"id": i} for i in range(start, end)]
+    next_cursor = str(end) if end <= TOTAL_ORDERS else None
+
+    return {"items": items, "next_cursor": next_cursor}
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path == "/orders":
+        client_id = request.headers.get("X-Client-Id", "anonymous")
+        now = time.time()
+
+        # Keep only timestamps within the last WINDOW_SECONDS
+        bucket = client_buckets[client_id]
+        client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS]
+
+        if len(client_buckets[client_id]) >= RATE_LIMIT:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "rate limit exceeded"},
+                headers={"Retry-After": str(WINDOW_SECONDS)},
+            )
+
+        client_buckets[client_id].append(now)
+
+    return await call_next(request)
+
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
