@@ -84,7 +84,7 @@ EXPECTED_AUDIENCE = "tds-huopxh4n.apps.exam.local"
 # real line breaks, this converts it back into real line breaks.
 # If your platform preserves real line breaks already, this line
 # does nothing harmful (it just won't find anything to replace).
-_raw_key = os.environ.get("IDP_PUBLIC_KEY", "")
+_raw_key = os.environ.get("IDP_PUBLIC_KEY", "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY\ncxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID\nEkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc\nWyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW\ned+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI\nSI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX\ndQIDAQAB\n-----END PUBLIC KEY-----")
 IDP_PUBLIC_KEY = _raw_key.replace("\\n", "\n")
 
 if not IDP_PUBLIC_KEY:
