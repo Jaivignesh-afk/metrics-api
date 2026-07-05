@@ -1,13 +1,17 @@
 import os
+import re
 import time
 import uuid
 import jwt
 from jwt import InvalidTokenError, InvalidKeyError
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 import os
 import glob
+import time
+import uuid
+from collections import defaultdict, deque
 
 try:
     import yaml
@@ -39,11 +43,15 @@ async def cors_and_headers_middleware(request: Request, call_next):
     # --- Handle CORS preflight (OPTIONS) requests ourselves ---
     if request.method == "OPTIONS":
         headers = {}
-        if path in ("/analytics", "/effective-config"):
+        if path in ("/effective-config"):
             # Open policy: allow any origin
             headers["Access-Control-Allow-Origin"] = (
                 ALLOWED_ORIGIN + ",https://exam.sanand.workers.dev/"
             )
+            headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+            headers["Access-Control-Allow-Headers"] = "*"
+        elif path in ("/analytics"):
+            headers["Access-Control-Allow-Origin"] = "*"
             headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
             headers["Access-Control-Allow-Headers"] = "*"
         else:
@@ -318,3 +326,154 @@ def effective_config(request: Request):
     merged["api_key"] = "****"
 
     return merged
+
+
+START_TIME = time.time()
+REQUEST_COUNTER = 0
+LOG_BUFFER = deque(maxlen=1000)  # keeps only the most recent 1000 entries
+
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    global REQUEST_COUNTER
+    REQUEST_COUNTER += 1  # counts EVERY request, to any endpoint
+
+    request_id = str(uuid.uuid4())
+    response = await call_next(request)
+
+    LOG_BUFFER.append({
+        "level": "info",
+        "ts": time.time(),
+        "path": request.url.path,
+        "request_id": request_id,
+    })
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.get("/work")
+def work(n: int):
+    # Simulate K units of work — cheap CPU loop
+    total = 0
+    for i in range(n):
+        total += i
+    return {"email": YOUR_EMAIL, "done": n}
+
+
+@app.get("/metrics")
+def metrics():
+    # Prometheus text exposition format
+    body = (
+        "# HELP http_requests_total Total HTTP requests\n"
+        "# TYPE http_requests_total counter\n"
+        f"http_requests_total {REQUEST_COUNTER}\n"
+    )
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "uptime_s": time.time() - START_TIME}
+
+
+@app.get("/logs/tail")
+def logs_tail(limit: int = 10):
+    # Return the last `limit` entries, most recent last (or first — either is fine)
+    return list(LOG_BUFFER)[-limit:]
+
+
+class ExtractRequest(BaseModel):
+    text: str
+
+class ExtractResponse(BaseModel):
+    vendor: str
+    amount: float
+    currency: str
+    date: str
+
+@app.post("/extract", response_model=ExtractResponse)
+def extract(body: ExtractRequest):
+    text = body.text or ""
+
+    try:
+        # Vendor: look for a capitalized phrase ending in a common company suffix
+        vendor_match = re.search(
+            r"([A-Z][A-Za-z0-9\-&]*(?:\s+[A-Z][A-Za-z0-9\-&]*)*\s+"
+            r"(?:Industries|Inc|Ltd|LLC|Corp|Co)\.?)",
+            text,
+        )
+        vendor = vendor_match.group(1) if vendor_match else "Unknown Vendor"
+
+        # Amount + currency: look for patterns like "USD 1234.56" or "$1234.56"
+        amount_match = re.search(r"(USD|EUR|GBP)\s*([\d,]+\.?\d*)", text)
+        if not amount_match:
+            amount_match = re.search(r"([\d,]+\.?\d*)\s*(USD|EUR|GBP)", text)
+        if amount_match:
+            groups = amount_match.groups()
+            if groups[0] in ("USD", "EUR", "GBP"):
+                currency, amount_str = groups[0], groups[1]
+            else:
+                amount_str, currency = groups[0], groups[1]
+            amount = float(amount_str.replace(",", ""))
+        else:
+            amount, currency = 0.0, "USD"
+
+        # Date: look for YYYY-MM-DD
+        date_match = re.search(r"(\d{4}-\d{2}-\d{2})", text)
+        date = date_match.group(1) if date_match else "1970-01-01"
+
+        return ExtractResponse(vendor=vendor, amount=amount, currency=currency, date=date)
+
+    except Exception:
+        # Never crash — return best-effort defaults instead of a 500
+        return ExtractResponse(vendor="Unknown", amount=0.0, currency="USD", date="1970-01-01")
+    
+
+ALLOWED_ORIGIN_10 = "https://app-kuinjq.example.com"
+EXAM_PAGE_ORIGIN = "https://exam.example.com"  # replace with the actual exam page origin
+BUCKET_SIZE = 9
+WINDOW_SECONDS_10 = 10
+
+ping_client_buckets: dict[str, list[float]] = defaultdict(list)
+
+@app.middleware("http")
+async def ping_middleware(request: Request, call_next):
+    if request.url.path != "/ping":
+        return await call_next(request)
+
+    origin = request.headers.get("origin")
+
+    # --- CORS: preflight ---
+    if request.method == "OPTIONS":
+        headers = {}
+        if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            headers["Access-Control-Allow-Headers"] = "*"
+        return JSONResponse(status_code=200, content={}, headers=headers)
+
+    # --- Rate limiting ---
+    client_id = request.headers.get("X-Client-Id", "anonymous")
+    now = time.time()
+    bucket = ping_client_buckets[client_id]
+    ping_client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS_10]
+
+    if len(ping_client_buckets[client_id]) >= BUCKET_SIZE:
+        return JSONResponse(status_code=429, content={"error": "rate limited"})
+    ping_client_buckets[client_id].append(now)
+
+    # --- Request context ---
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
+    response = await call_next(request)
+
+    response.headers["X-Request-ID"] = request_id
+    if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
+        response.headers["Access-Control-Allow-Origin"] = origin
+
+    return response
+
+
+@app.get("/ping")
+def ping(request: Request):
+    request_id = request.headers.get("X-Request-ID") or "unset"
+    return {"email": YOUR_EMAIL, "request_id": request_id}
