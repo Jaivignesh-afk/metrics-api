@@ -1,23 +1,24 @@
+import os
 import time
 import uuid
+import jwt
+from jwt import InvalidTokenError
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 app = FastAPI()
 
 ALLOWED_ORIGIN = "https://dash-7et21z.example.com"
-YOUR_EMAIL = "23f1001347@ds.study.iitm.ac.in"  # <-- put your real logged-in email here
+YOUR_EMAIL = "23f1001347@ds.study.iitm.ac.in"
 
 # --- CORS setup ---
-# This tells FastAPI: only allow the one specific origin above.
-# CORSMiddleware automatically handles OPTIONS preflight requests correctly:
-# it adds the ACAO header only when the request's Origin matches allow_origins.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[ALLOWED_ORIGIN],
     allow_credentials=True,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -34,14 +35,15 @@ async def add_custom_headers(request: Request, call_next):
     response.headers["X-Process-Time"] = f"{process_time:.6f}"
     return response
 
+
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
 
-# --- The actual endpoint ---
+
+# --- /stats endpoint ---
 @app.get("/stats")
 def get_stats(values: str):
-    # values comes in as a string like "1,2,3,4"
     try:
         numbers = [int(v.strip()) for v in values.split(",") if v.strip() != ""]
     except ValueError:
@@ -51,10 +53,7 @@ def get_stats(values: str):
         )
 
     if not numbers:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "no values provided"},
-        )
+        return JSONResponse(status_code=400, content={"error": "no values provided"})
 
     count = len(numbers)
     total = sum(numbers)
@@ -70,3 +69,51 @@ def get_stats(values: str):
         "max": maximum,
         "mean": mean,
     }
+
+
+# ===========================================================
+# /verify endpoint
+# ===========================================================
+
+EXPECTED_ISSUER = "https://idp.exam.local"
+EXPECTED_AUDIENCE = "tds-huopxh4n.apps.exam.local"
+
+# Read the public key from the environment variable at startup.
+# .replace("\\n", "\n") is a safety net: if your hosting platform
+# stores the key as one line with literal "\n" text instead of
+# real line breaks, this converts it back into real line breaks.
+# If your platform preserves real line breaks already, this line
+# does nothing harmful (it just won't find anything to replace).
+_raw_key = os.environ.get("IDP_PUBLIC_KEY", "")
+IDP_PUBLIC_KEY = _raw_key.replace("\\n", "\n")
+
+if not IDP_PUBLIC_KEY:
+    # This will show up loudly in your deploy logs if the env var
+    # wasn't set, instead of silently failing every /verify call.
+    print("WARNING: IDP_PUBLIC_KEY environment variable is not set!")
+
+
+class VerifyRequest(BaseModel):
+    token: str
+
+
+@app.post("/verify")
+def verify_token(body: VerifyRequest):
+    try:
+        claims = jwt.decode(
+            body.token,
+            IDP_PUBLIC_KEY,
+            algorithms=["RS256"],
+            issuer=EXPECTED_ISSUER,
+            audience=EXPECTED_AUDIENCE,
+        )
+
+        return {
+            "valid": True,
+            "email": claims.get("email"),
+            "sub": claims.get("sub"),
+            "aud": claims.get("aud"),
+        }
+
+    except InvalidTokenError:
+        return JSONResponse(status_code=401, content={"valid": False})
