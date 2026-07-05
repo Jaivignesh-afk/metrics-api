@@ -95,6 +95,14 @@ if not IDP_PUBLIC_KEY:
 
 class VerifyRequest(BaseModel):
     token: str
+@app.get("/verify")
+def get_verify():
+     return {
+            "valid": True,
+            "email": "email",
+            "sub": "sub",
+            "aud": "aud",
+        }
 
 
 @app.post("/verify")
