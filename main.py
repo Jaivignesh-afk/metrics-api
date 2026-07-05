@@ -8,11 +8,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import os
 import glob
+
 try:
     import yaml
 except ImportError:
     yaml = None
-    
+
 app = FastAPI()
 
 ALLOWED_ORIGIN = "https://dash-7et21z.example.com"
@@ -29,6 +30,7 @@ ANALYTICS_API_KEY = "ak_vzqzkhznhc7e3wztts7scwhb"
 #   - /analytics          -> everyone gets "*"
 # So we handle CORS by hand, based on request.url.path.
 
+
 @app.middleware("http")
 async def cors_and_headers_middleware(request: Request, call_next):
     origin = request.headers.get("origin")
@@ -39,7 +41,9 @@ async def cors_and_headers_middleware(request: Request, call_next):
         headers = {}
         if path in ("/analytics", "/effective-config"):
             # Open policy: allow any origin
-            headers["Access-Control-Allow-Origin"] = "*"
+            headers["Access-Control-Allow-Origin"] = (
+                ALLOWED_ORIGIN + ",https://exam.sanand.workers.dev/"
+            )
             headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
             headers["Access-Control-Allow-Headers"] = "*"
         else:
@@ -84,7 +88,10 @@ def get_stats(values: str):
     try:
         numbers = [int(v.strip()) for v in values.split(",") if v.strip() != ""]
     except ValueError:
-        return JSONResponse(status_code=400, content={"error": "values must be a comma-separated list of integers"})
+        return JSONResponse(
+            status_code=400,
+            content={"error": "values must be a comma-separated list of integers"},
+        )
     if not numbers:
         return JSONResponse(status_code=400, content={"error": "no values provided"})
 
@@ -110,12 +117,17 @@ def get_stats(values: str):
 EXPECTED_ISSUER = "https://idp.exam.local"
 EXPECTED_AUDIENCE = "tds-huopxh4n.apps.exam.local"
 
-_raw_key = os.environ.get("IDP_PUBLIC_KEY", "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY\ncxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID\nEkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc\nWyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW\ned+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI\nSI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX\ndQIDAQAB\n-----END PUBLIC KEY-----")
+_raw_key = os.environ.get(
+    "IDP_PUBLIC_KEY",
+    "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY\ncxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID\nEkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc\nWyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW\ned+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI\nSI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX\ndQIDAQAB\n-----END PUBLIC KEY-----",
+)
 IDP_PUBLIC_KEY = _raw_key.replace("\\n", "\n").strip()
 
 if not IDP_PUBLIC_KEY.startswith("-----BEGIN PUBLIC KEY-----"):
-    print("WARNING: IDP_PUBLIC_KEY is missing or malformed! "
-          f"First 40 chars seen: {IDP_PUBLIC_KEY[:40]!r}")
+    print(
+        "WARNING: IDP_PUBLIC_KEY is missing or malformed! "
+        f"First 40 chars seen: {IDP_PUBLIC_KEY[:40]!r}"
+    )
 
 
 class VerifyRequest(BaseModel):
@@ -162,7 +174,9 @@ def analytics(body: AnalyticsRequest, request: Request):
     # 1. Check the API key first, before doing anything else.
     provided_key = request.headers.get("X-API-Key")
     if provided_key != ANALYTICS_API_KEY:
-        return JSONResponse(status_code=401, content={"error": "invalid or missing API key"})
+        return JSONResponse(
+            status_code=401, content={"error": "invalid or missing API key"}
+        )
 
     events = body.events
 
@@ -180,7 +194,9 @@ def analytics(body: AnalyticsRequest, request: Request):
     per_user_positive_totals: dict[str, float] = {}
     for e in events:
         if e.amount > 0:
-            per_user_positive_totals[e.user] = per_user_positive_totals.get(e.user, 0) + e.amount
+            per_user_positive_totals[e.user] = (
+                per_user_positive_totals.get(e.user, 0) + e.amount
+            )
 
     top_user = None
     if per_user_positive_totals:
@@ -194,7 +210,8 @@ def analytics(body: AnalyticsRequest, request: Request):
         "revenue": revenue,
         "top_user": top_user,
     }
-    
+
+
 # ===========================================================
 # /effective-config endpoint
 # ===========================================================
@@ -207,6 +224,7 @@ DEFAULTS = {
     "api_key": "default-secret-000",
 }
 
+
 def load_yaml_layer():
     env_name = os.environ.get("APP_ENV", "development")
     path = f"config.{env_name}.yaml"
@@ -215,6 +233,7 @@ def load_yaml_layer():
             data = yaml.safe_load(f) or {}
         return data
     return {}
+
 
 def load_dotenv_layer():
     """Parses a .env file manually (KEY=VALUE per line)."""
@@ -241,6 +260,7 @@ def load_dotenv_layer():
                     layer["api_key"] = value
     return layer
 
+
 def load_os_env_layer():
     """Reads real OS environment variables with APP_ prefix."""
     layer = {}
@@ -257,6 +277,7 @@ def load_os_env_layer():
             layer[config_key] = os.environ[env_key]
     return layer
 
+
 def coerce_types(config: dict) -> dict:
     result = dict(config)
     if "port" in result:
@@ -272,6 +293,7 @@ def coerce_types(config: dict) -> dict:
     if "log_level" in result:
         result["log_level"] = str(result["log_level"])
     return result
+
 
 @app.get("/effective-config")
 def effective_config(request: Request):
