@@ -189,3 +189,105 @@ def analytics(body: AnalyticsRequest, request: Request):
         "revenue": revenue,
         "top_user": top_user,
     }
+    
+# ===========================================================
+# /effective-config endpoint
+# ===========================================================
+
+DEFAULTS = {
+    "port": 8000,
+    "workers": 1,
+    "debug": False,
+    "log_level": "info",
+    "api_key": "default-secret-000",
+}
+
+def load_yaml_layer():
+    env_name = os.environ.get("APP_ENV", "development")
+    path = f"config.{env_name}.yaml"
+    if yaml and os.path.exists(path):
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        return data
+    return {}
+
+def load_dotenv_layer():
+    """Parses a .env file manually (KEY=VALUE per line)."""
+    layer = {}
+    if os.path.exists(".env"):
+        with open(".env") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+
+                # Map .env keys (APP_PORT, NUM_WORKERS, etc.) to our config keys
+                if key == "APP_PORT":
+                    layer["port"] = value
+                elif key in ("APP_WORKERS", "NUM_WORKERS"):
+                    layer["workers"] = value
+                elif key == "APP_DEBUG":
+                    layer["debug"] = value
+                elif key == "APP_LOG_LEVEL":
+                    layer["log_level"] = value
+                elif key == "APP_API_KEY":
+                    layer["api_key"] = value
+    return layer
+
+def load_os_env_layer():
+    """Reads real OS environment variables with APP_ prefix."""
+    layer = {}
+    mapping = {
+        "APP_PORT": "port",
+        "APP_WORKERS": "workers",
+        "NUM_WORKERS": "workers",
+        "APP_DEBUG": "debug",
+        "APP_LOG_LEVEL": "log_level",
+        "APP_API_KEY": "api_key",
+    }
+    for env_key, config_key in mapping.items():
+        if env_key in os.environ:
+            layer[config_key] = os.environ[env_key]
+    return layer
+
+def coerce_types(config: dict) -> dict:
+    result = dict(config)
+    if "port" in result:
+        result["port"] = int(result["port"])
+    if "workers" in result:
+        result["workers"] = int(result["workers"])
+    if "debug" in result:
+        val = result["debug"]
+        if isinstance(val, bool):
+            pass
+        else:
+            result["debug"] = str(val).strip().lower() in ("true", "1", "yes", "on")
+    if "log_level" in result:
+        result["log_level"] = str(result["log_level"])
+    return result
+
+@app.get("/effective-config")
+def effective_config(request: Request):
+    # Merge layers from lowest to highest precedence.
+    # Each dict.update() call overwrites keys from earlier layers.
+    merged = dict(DEFAULTS)
+    merged.update(load_yaml_layer())
+    merged.update(load_dotenv_layer())
+    merged.update(load_os_env_layer())
+
+    # Apply ?set=key=value overrides (highest precedence).
+    # request.query_params.getlist("set") gets ALL "set" params,
+    # since multiple ?set=... can appear in the same URL.
+    for override in request.query_params.getlist("set"):
+        if "=" in override:
+            key, _, value = override.partition("=")
+            merged[key.strip()] = value.strip()
+
+    merged = coerce_types(merged)
+
+    # Always mask the secret before returning it.
+    merged["api_key"] = "****"
+
+    return merged
