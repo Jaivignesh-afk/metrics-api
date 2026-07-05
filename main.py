@@ -6,7 +6,13 @@ from jwt import InvalidTokenError, InvalidKeyError
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-
+import os
+import glob
+try:
+    import yaml
+except ImportError:
+    yaml = None
+    
 app = FastAPI()
 
 ALLOWED_ORIGIN = "https://dash-7et21z.example.com"
@@ -31,7 +37,7 @@ async def cors_and_headers_middleware(request: Request, call_next):
     # --- Handle CORS preflight (OPTIONS) requests ourselves ---
     if request.method == "OPTIONS":
         headers = {}
-        if path == "/analytics":
+        if path in ("/analytics", "/effective-config"):
             # Open policy: allow any origin
             headers["Access-Control-Allow-Origin"] = "*"
             headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
@@ -117,7 +123,6 @@ class VerifyRequest(BaseModel):
 
 
 @app.post("/verify")
-@app.post("/")
 def verify_token(body: VerifyRequest):
     try:
         claims = jwt.decode(
