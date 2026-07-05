@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 app = FastAPI()
 
 ALLOWED_ORIGIN = "https://dash-7et21z.example.com"
-YOUR_EMAIL = "your.email@example.com"  # <-- put your real logged-in email here
+YOUR_EMAIL = "23f1001347@ds.study.iitm.ac.in"  # <-- put your real logged-in email here
 
 # --- CORS setup ---
 # This tells FastAPI: only allow the one specific origin above.
@@ -34,6 +34,9 @@ async def add_custom_headers(request: Request, call_next):
     response.headers["X-Process-Time"] = f"{process_time:.6f}"
     return response
 
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
 
 # --- The actual endpoint ---
 @app.get("/stats")
