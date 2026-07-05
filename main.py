@@ -106,6 +106,7 @@ def get_verify():
 
 
 @app.post("/verify")
+@app.post("/")
 def verify_token(body: VerifyRequest):
     try:
         claims = jwt.decode(
