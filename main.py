@@ -10,8 +10,8 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-ALLOWED_ORIGIN = "https://dash-7et21z.example.com"
-YOUR_EMAIL = "23f1001347@ds.study.iitm.ac.in"
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN")
+YOUR_EMAIL = os.environ.get("YOUR_EMAIL")
 
 # --- CORS setup ---
 app.add_middleware(
