@@ -36,53 +36,83 @@ ANALYTICS_API_KEY = "ak_vzqzkhznhc7e3wztts7scwhb"
 
 
 @app.middleware("http")
-async def cors_and_headers_middleware(request: Request, call_next):
+async def unified_middleware(request: Request, call_next):
     origin = request.headers.get("origin")
     path = request.url.path
 
-    # --- Handle CORS preflight (OPTIONS) requests ourselves ---
+    OPEN_CORS_PATHS = ("/effective-config", "/analytics", "/orders")
+
+    # ============================================================
+    # Handle OPTIONS preflight requests first, before anything else
+    # ============================================================
     if request.method == "OPTIONS":
         headers = {}
-        if path in ("/effective-config"):
-            # Open policy: allow any origin
-            headers["Access-Control-Allow-Origin"] = (
-                ALLOWED_ORIGIN + ",https://exam.sanand.workers.dev/"
-            )
-            headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-            headers["Access-Control-Allow-Headers"] = "*"
-        elif path in ("/analytics"):
+
+        if path == "/ping":
+            if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
+                headers["Access-Control-Allow-Origin"] = origin
+                headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+                headers["Access-Control-Allow-Headers"] = "*"
+
+        elif path in OPEN_CORS_PATHS:
             headers["Access-Control-Allow-Origin"] = "*"
-            headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+            headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             headers["Access-Control-Allow-Headers"] = "*"
+
         else:
-            # Strict policy: only the assigned origin gets a header
+            # Strict policy for /stats, /verify, etc.
             if origin == ALLOWED_ORIGIN:
                 headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
                 headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
                 headers["Access-Control-Allow-Headers"] = "*"
-            # If origin doesn't match, we simply add NO CORS headers.
+            # No match -> no CORS headers at all
+
         return JSONResponse(status_code=200, content={}, headers=headers)
 
-    # --- Handle the actual request/response ---
+    # ============================================================
+    # /ping-specific: rate limiting (only applies to this path)
+    # ============================================================
+    if path == "/ping":
+        client_id = request.headers.get("X-Client-Id", "anonymous")
+        now = time.time()
+        bucket = ping_client_buckets[client_id]
+        ping_client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS_10]
+
+        if len(ping_client_buckets[client_id]) >= BUCKET_SIZE:
+            return JSONResponse(status_code=429, content={"error": "rate limited"})
+        ping_client_buckets[client_id].append(now)
+
+        # Stash request_id for the route handler to use
+        request.state.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
+    # ============================================================
+    # Run the actual route
+    # ============================================================
     start_time = time.time()
-    request_id = str(uuid.uuid4())
+    generic_request_id = str(uuid.uuid4())
 
     response = await call_next(request)
 
     process_time = time.time() - start_time
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-Process-Time"] = f"{process_time:.6f}"
 
-    # Add the correct CORS header to the real response too
-    if path == "/analytics":
-        response.headers["Access-Control-Allow-Origin"] = "*"
+    # ============================================================
+    # Attach response headers based on path
+    # ============================================================
+    if path == "/ping":
+        response.headers["X-Request-ID"] = request.state.request_id
+        if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
+            response.headers["Access-Control-Allow-Origin"] = origin
+
     else:
-        if origin == ALLOWED_ORIGIN:
+        response.headers["X-Request-ID"] = generic_request_id
+        response.headers["X-Process-Time"] = f"{process_time:.6f}"
+
+        if path in OPEN_CORS_PATHS:
+            response.headers["Access-Control-Allow-Origin"] = "*"
+        elif origin == ALLOWED_ORIGIN:
             response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
 
     return response
-
-
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
@@ -332,6 +362,7 @@ START_TIME = time.time()
 REQUEST_COUNTER = 0
 LOG_BUFFER = deque(maxlen=1000)  # keeps only the most recent 1000 entries
 
+
 @app.middleware("http")
 async def logging_middleware(request: Request, call_next):
     global REQUEST_COUNTER
@@ -340,12 +371,14 @@ async def logging_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())
     response = await call_next(request)
 
-    LOG_BUFFER.append({
-        "level": "info",
-        "ts": time.time(),
-        "path": request.url.path,
-        "request_id": request_id,
-    })
+    LOG_BUFFER.append(
+        {
+            "level": "info",
+            "ts": time.time(),
+            "path": request.url.path,
+            "request_id": request_id,
+        }
+    )
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -384,11 +417,13 @@ def logs_tail(limit: int = 10):
 class ExtractRequest(BaseModel):
     text: str
 
+
 class ExtractResponse(BaseModel):
     vendor: str
     amount: float
     currency: str
     date: str
+
 
 @app.post("/extract", response_model=ExtractResponse)
 def extract(body: ExtractRequest):
@@ -421,56 +456,25 @@ def extract(body: ExtractRequest):
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", text)
         date = date_match.group(1) if date_match else "1970-01-01"
 
-        return ExtractResponse(vendor=vendor, amount=amount, currency=currency, date=date)
+        return ExtractResponse(
+            vendor=vendor, amount=amount, currency=currency, date=date
+        )
 
     except Exception:
         # Never crash — return best-effort defaults instead of a 500
-        return ExtractResponse(vendor="Unknown", amount=0.0, currency="USD", date="1970-01-01")
-    
+        return ExtractResponse(
+            vendor="Unknown", amount=0.0, currency="USD", date="1970-01-01"
+        )
+
 
 ALLOWED_ORIGIN_10 = "https://app-kuinjq.example.com"
-EXAM_PAGE_ORIGIN = "https://exam.example.com"  # replace with the actual exam page origin
+EXAM_PAGE_ORIGIN = (
+    "https://exam.example.com"  # replace with the actual exam page origin
+)
 BUCKET_SIZE = 9
 WINDOW_SECONDS_10 = 10
 
 ping_client_buckets: dict[str, list[float]] = defaultdict(list)
-
-@app.middleware("http")
-async def ping_middleware(request: Request, call_next):
-    if request.url.path != "/ping":
-        return await call_next(request)
-
-    origin = request.headers.get("origin")
-
-    # --- CORS: preflight ---
-    if request.method == "OPTIONS":
-        headers = {}
-        if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
-            headers["Access-Control-Allow-Origin"] = origin
-            headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-            headers["Access-Control-Allow-Headers"] = "*"
-        return JSONResponse(status_code=200, content={}, headers=headers)
-
-    # --- Rate limiting ---
-    client_id = request.headers.get("X-Client-Id", "anonymous")
-    now = time.time()
-    bucket = ping_client_buckets[client_id]
-    ping_client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS_10]
-
-    if len(ping_client_buckets[client_id]) >= BUCKET_SIZE:
-        return JSONResponse(status_code=429, content={"error": "rate limited"})
-    ping_client_buckets[client_id].append(now)
-
-    # --- Request context ---
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-
-    response = await call_next(request)
-
-    response.headers["X-Request-ID"] = request_id
-    if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
-        response.headers["Access-Control-Allow-Origin"] = origin
-
-    return response
 
 
 @app.get("/ping")
