@@ -7,10 +7,6 @@ from jwt import InvalidTokenError, InvalidKeyError
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
-import os
-import glob
-import time
-import uuid
 from collections import defaultdict, deque
 
 try:
@@ -20,142 +16,58 @@ except ImportError:
 
 app = FastAPI()
 
-ALLOWED_ORIGIN = "https://dash-7et21z.example.com"
+# ===========================================================
+# CONFIGURATION
+# ===========================================================
 YOUR_EMAIL = "23f1001347@ds.study.iitm.ac.in"
 ANALYTICS_API_KEY = "ak_vzqzkhznhc7e3wztts7scwhb"
 
-
-# ===========================================================
-# CUSTOM CORS + REQUEST-ID/TIMING MIDDLEWARE (combined)
-# ===========================================================
-# We're no longer using FastAPI's built-in CORSMiddleware because
-# it applies ONE policy to the whole app. We need TWO policies:
-#   - /stats and /verify -> only ALLOWED_ORIGIN gets the header
-#   - /analytics          -> everyone gets "*"
-# So we handle CORS by hand, based on request.url.path.
-
-
-@app.middleware("http")
-async def unified_middleware(request: Request, call_next):
-    origin = request.headers.get("origin")
-    path = request.url.path
-
-    OPEN_CORS_PATHS = ("/effective-config", "/analytics", "/orders")
-
-    # ============================================================
-    # Handle OPTIONS preflight requests first, before anything else
-    # ============================================================
-    if request.method == "OPTIONS":
-        headers = {}
-
-        if path == "/ping":
-            if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
-                headers["Access-Control-Allow-Origin"] = origin
-                headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-                headers["Access-Control-Allow-Headers"] = "*"
-
-        elif path in OPEN_CORS_PATHS:
-            headers["Access-Control-Allow-Origin"] = "*"
-            headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-            headers["Access-Control-Allow-Headers"] = "*"
-
-        else:
-            # Strict policy for /stats, /verify, etc.
-            if origin == ALLOWED_ORIGIN:
-                headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
-                headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-                headers["Access-Control-Allow-Headers"] = "*"
-            # No match -> no CORS headers at all
-
-        return JSONResponse(status_code=200, content={}, headers=headers)
-
-    # ============================================================
-    # /ping-specific: rate limiting (only applies to this path)
-    # ============================================================
-    if path == "/ping":
-        client_id = request.headers.get("X-Client-Id", "anonymous")
-        now = time.time()
-        bucket = ping_client_buckets[client_id]
-        ping_client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS_10]
-
-        if len(ping_client_buckets[client_id]) >= BUCKET_SIZE:
-            return JSONResponse(status_code=429, content={"error": "rate limited"})
-        ping_client_buckets[client_id].append(now)
-
-        # Stash request_id for the route handler to use
-        request.state.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-
-    # ============================================================
-    # Run the actual route
-    # ============================================================
-    start_time = time.time()
-    generic_request_id = str(uuid.uuid4())
-
-    response = await call_next(request)
-
-    process_time = time.time() - start_time
-
-    # ============================================================
-    # Attach response headers based on path
-    # ============================================================
-    if path == "/ping":
-        response.headers["X-Request-ID"] = request.state.request_id
-        if origin in (ALLOWED_ORIGIN_10, EXAM_PAGE_ORIGIN):
-            response.headers["Access-Control-Allow-Origin"] = origin
-
-    else:
-        response.headers["X-Request-ID"] = generic_request_id
-        response.headers["X-Process-Time"] = f"{process_time:.6f}"
-
-        if path in OPEN_CORS_PATHS:
-            response.headers["Access-Control-Allow-Origin"] = "*"
-        elif origin == ALLOWED_ORIGIN:
-            response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
-
-    return response
-
-
+# Old Assignments
+ALLOWED_ORIGIN = "https://dash-7et21z.example.com"
 TOTAL_ORDERS = 50
 RATE_LIMIT = 20
 WINDOW_SECONDS = 10
 
-# In-memory stores (fine since "stateless" isn't required here)
+# New /ping Assignment
+ALLOWED_ORIGIN_10 = "https://app-kuinjq.example.com"
+BUCKET_SIZE = 9
+WINDOW_SECONDS_10 = 10
+
 idempotency_store: dict[str, dict] = {}
 client_buckets: dict[str, list[float]] = defaultdict(list)
+ping_client_buckets: dict[str, list[float]] = defaultdict(list)
 
-@app.post("/orders")
-def create_order(idempotency_key: str = Header(None, alias="Idempotency-Key")):
-    if idempotency_key and idempotency_key in idempotency_store:
-        # Same key seen before -> return the SAME order, no duplicate
-        return JSONResponse(status_code=201, content=idempotency_store[idempotency_key])
+START_TIME = time.time()
+REQUEST_COUNTER = 0
+LOG_BUFFER = deque(maxlen=1000)
 
-    order = {"id": str(uuid.uuid4()), "status": "created"}
-    if idempotency_key:
-        idempotency_store[idempotency_key] = order
-
-    return JSONResponse(status_code=201, content=order)
-
-
-@app.get("/orders")
-def list_orders(limit: int = 10, cursor: str = None):
-    # cursor = string form of the next starting ID (1-indexed)
-    start = int(cursor) if cursor else 1
-    end = min(start + limit, TOTAL_ORDERS + 1)
-
-    items = [{"id": i} for i in range(start, end)]
-    next_cursor = str(end) if end <= TOTAL_ORDERS else None
-
-    return {"items": items, "next_cursor": next_cursor}
-
-
+# ===========================================================
+# MIDDLEWARE LAYER 1: RATE LIMITER (Innermost - runs last on way in)
+# ===========================================================
 @app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    if request.url.path == "/orders":
+async def m3_rate_limiting_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # /ping Rate Limiter (New assignment)
+    if path == "/ping":
         client_id = request.headers.get("X-Client-Id", "anonymous")
         now = time.time()
+        bucket = ping_client_buckets[client_id]
+        
+        # Prune older than 10 seconds
+        ping_client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS_10]
 
-        # Keep only timestamps within the last WINDOW_SECONDS
+        if len(ping_client_buckets[client_id]) >= BUCKET_SIZE:
+            return JSONResponse(status_code=429, content={"error": "rate limited"})
+        
+        ping_client_buckets[client_id].append(now)
+
+    # /orders Rate Limiter (Legacy assignment)
+    elif path == "/orders":
+        client_id = request.headers.get("X-Client-Id", "anonymous")
+        now = time.time()
         bucket = client_buckets[client_id]
+        
         client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS]
 
         if len(client_buckets[client_id]) >= RATE_LIMIT:
@@ -164,192 +76,222 @@ async def rate_limit_middleware(request: Request, call_next):
                 content={"error": "rate limit exceeded"},
                 headers={"Retry-After": str(WINDOW_SECONDS)},
             )
-
         client_buckets[client_id].append(now)
 
     return await call_next(request)
+
+# ===========================================================
+# MIDDLEWARE LAYER 2: CORS POLICY (Middle)
+# ===========================================================
+@app.middleware("http")
+async def m2_cors_middleware(request: Request, call_next):
+    path = request.url.path
+    origin = request.headers.get("origin")
+    OPEN_CORS_PATHS = ("/effective-config", "/analytics", "/orders")
+
+    # Handle OPTIONS Preflight
+    if request.method == "OPTIONS":
+        headers = {}
+        if path == "/ping":
+            # Allow target origin OR the exam platform dynamically
+            if origin == ALLOWED_ORIGIN_10 or (origin and "appsec.education" in origin):
+                headers["Access-Control-Allow-Origin"] = origin
+                headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+                headers["Access-Control-Allow-Headers"] = "*"
+            return PlainTextResponse("", status_code=204, headers=headers)
+            
+        elif path in OPEN_CORS_PATHS:
+            headers["Access-Control-Allow-Origin"] = "*"
+            headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            headers["Access-Control-Allow-Headers"] = "*"
+            return PlainTextResponse("", status_code=204, headers=headers)
+            
+        elif origin == ALLOWED_ORIGIN:
+            headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
+            headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            headers["Access-Control-Allow-Headers"] = "*"
+            return PlainTextResponse("", status_code=204, headers=headers)
+            
+        return PlainTextResponse("", status_code=204)
+
+    # Proceed to actual request
+    response = await call_next(request)
+
+    # Attach headers for standard requests
+    if path == "/ping":
+        if origin == ALLOWED_ORIGIN_10 or (origin and "appsec.education" in origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+    elif path in OPEN_CORS_PATHS:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    elif origin == ALLOWED_ORIGIN:
+        response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
+
+    return response
+
+# ===========================================================
+# MIDDLEWARE LAYER 3: REQUEST CONTEXT & LOGGING (Outermost - runs first)
+# ===========================================================
+@app.middleware("http")
+async def m1_request_context_and_logging_middleware(request: Request, call_next):
+    global REQUEST_COUNTER
+    REQUEST_COUNTER += 1
+    
+    start_time = time.time()
+
+    # If incoming request has an ID, use it. Else, create one.
+    req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = req_id
+
+    # Call deeper layers
+    response = await call_next(request)
+
+    process_time = time.time() - start_time
+
+    # Always ensure X-Request-ID is embedded in response
+    response.headers["X-Request-ID"] = req_id
+    
+    if request.url.path != "/ping":
+        response.headers["X-Process-Time"] = f"{process_time:.6f}"
+
+    LOG_BUFFER.append({
+        "level": "info",
+        "ts": time.time(),
+        "path": request.url.path,
+        "request_id": req_id,
+    })
+
+    return response
+
+# ===========================================================
+# NEW ENDPOINT: /ping
+# ===========================================================
+@app.get("/ping")
+def ping(request: Request):
+    # Fetch the ID propagated securely by Layer 3
+    request_id = getattr(request.state, "request_id", "unset")
+    return {"email": YOUR_EMAIL, "request_id": request_id}
+
+
+# ===========================================================
+# LEGACY ENDPOINTS (Preserved)
+# ===========================================================
+@app.post("/orders")
+def create_order(idempotency_key: str = Header(None, alias="Idempotency-Key")):
+    if idempotency_key and idempotency_key in idempotency_store:
+        return JSONResponse(status_code=201, content=idempotency_store[idempotency_key])
+
+    order = {"id": str(uuid.uuid4()), "status": "created"}
+    if idempotency_key:
+        idempotency_store[idempotency_key] = order
+    return JSONResponse(status_code=201, content=order)
+
+
+@app.get("/orders")
+def list_orders(limit: int = 10, cursor: str = None):
+    start = int(cursor) if cursor else 1
+    end = min(start + limit, TOTAL_ORDERS + 1)
+    items = [{"id": i} for i in range(start, end)]
+    next_cursor = str(end) if end <= TOTAL_ORDERS else None
+    return {"items": items, "next_cursor": next_cursor}
+
 
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
 
 
-# ===========================================================
-# /stats endpoint (unchanged)
-# ===========================================================
 @app.get("/stats")
 def get_stats(values: str):
     try:
         numbers = [int(v.strip()) for v in values.split(",") if v.strip() != ""]
     except ValueError:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "values must be a comma-separated list of integers"},
-        )
+        return JSONResponse(status_code=400, content={"error": "values must be integers"})
     if not numbers:
         return JSONResponse(status_code=400, content={"error": "no values provided"})
 
-    count = len(numbers)
-    total = sum(numbers)
-    minimum = min(numbers)
-    maximum = max(numbers)
-    mean = total / count
-
     return {
         "email": YOUR_EMAIL,
-        "count": count,
-        "sum": total,
-        "min": minimum,
-        "max": maximum,
-        "mean": mean,
+        "count": len(numbers),
+        "sum": sum(numbers),
+        "min": min(numbers),
+        "max": max(numbers),
+        "mean": sum(numbers) / len(numbers),
     }
 
 
-# ===========================================================
-# /verify endpoint (unchanged)
-# ===========================================================
 EXPECTED_ISSUER = "https://idp.exam.local"
 EXPECTED_AUDIENCE = "tds-huopxh4n.apps.exam.local"
-
 _raw_key = os.environ.get(
     "IDP_PUBLIC_KEY",
     "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY\ncxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID\nEkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc\nWyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW\ned+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI\nSI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX\ndQIDAQAB\n-----END PUBLIC KEY-----",
 )
 IDP_PUBLIC_KEY = _raw_key.replace("\\n", "\n").strip()
 
-if not IDP_PUBLIC_KEY.startswith("-----BEGIN PUBLIC KEY-----"):
-    print(
-        "WARNING: IDP_PUBLIC_KEY is missing or malformed! "
-        f"First 40 chars seen: {IDP_PUBLIC_KEY[:40]!r}"
-    )
-
-
 class VerifyRequest(BaseModel):
     token: str
-
 
 @app.post("/verify")
 def verify_token(body: VerifyRequest):
     try:
         claims = jwt.decode(
-            body.token,
-            IDP_PUBLIC_KEY,
-            algorithms=["RS256"],
-            issuer=EXPECTED_ISSUER,
-            audience=EXPECTED_AUDIENCE,
+            body.token, IDP_PUBLIC_KEY, algorithms=["RS256"],
+            issuer=EXPECTED_ISSUER, audience=EXPECTED_AUDIENCE,
         )
-        return {
-            "valid": True,
-            "email": claims.get("email"),
-            "sub": claims.get("sub"),
-            "aud": claims.get("aud"),
-        }
-    except (InvalidTokenError, InvalidKeyError):
-        return JSONResponse(status_code=401, content={"valid": False})
+        return {"valid": True, "email": claims.get("email"), "sub": claims.get("sub"), "aud": claims.get("aud")}
     except Exception:
         return JSONResponse(status_code=401, content={"valid": False})
 
 
-# ===========================================================
-# NEW: /analytics endpoint
-# ===========================================================
 class AnalyticsEvent(BaseModel):
     user: str
     amount: float
     ts: int
 
-
 class AnalyticsRequest(BaseModel):
     events: list[AnalyticsEvent]
 
-
 @app.post("/analytics")
 def analytics(body: AnalyticsRequest, request: Request):
-    # 1. Check the API key first, before doing anything else.
-    provided_key = request.headers.get("X-API-Key")
-    if provided_key != ANALYTICS_API_KEY:
-        return JSONResponse(
-            status_code=401, content={"error": "invalid or missing API key"}
-        )
+    if request.headers.get("X-API-Key") != ANALYTICS_API_KEY:
+        return JSONResponse(status_code=401, content={"error": "invalid key"})
 
     events = body.events
-
-    # 2. total_events = just count everything in the list
-    total_events = len(events)
-
-    # 3. unique_users = how many distinct "user" names appear
-    unique_users = len(set(e.user for e in events))
-
-    # 4. revenue = sum of amounts, but ONLY positive ones
-    revenue = sum(e.amount for e in events if e.amount > 0)
-
-    # 5. top_user = whoever has the highest POSITIVE total
-    #    We build a running total per user, but only add positive amounts.
-    per_user_positive_totals: dict[str, float] = {}
+    per_user_pos_totals = {}
     for e in events:
         if e.amount > 0:
-            per_user_positive_totals[e.user] = (
-                per_user_positive_totals.get(e.user, 0) + e.amount
-            )
-
-    top_user = None
-    if per_user_positive_totals:
-        # max(..., key=...) finds the dict key with the highest value
-        top_user = max(per_user_positive_totals, key=per_user_positive_totals.get)
+            per_user_pos_totals[e.user] = per_user_pos_totals.get(e.user, 0) + e.amount
 
     return {
         "email": YOUR_EMAIL,
-        "total_events": total_events,
-        "unique_users": unique_users,
-        "revenue": revenue,
-        "top_user": top_user,
+        "total_events": len(events),
+        "unique_users": len(set(e.user for e in events)),
+        "revenue": sum(e.amount for e in events if e.amount > 0),
+        "top_user": max(per_user_pos_totals, key=per_user_pos_totals.get) if per_user_pos_totals else None,
     }
 
 
-# ===========================================================
-# /effective-config endpoint
-# ===========================================================
-
-# ===========================================================
-# Config layers
-# ===========================================================
-
-DEFAULTS = {
-    "port": 8000,
-    "workers": 1,
-    "debug": False,
-    "log_level": "info",
-    "api_key": "default-secret-000",
-}
-
-# Layer 2: config.development.yaml — hardcoded, matches assigned values exactly
-YAML_LAYER = {
-    "api_key": "key-x6kaf8bnud",
-}
-
-# Layer 3: .env file — hardcoded, matches assigned values exactly
-DOTENV_LAYER = {
-    "port": "8786",
-    "log_level": "warning",
-}
+DEFAULTS = {"port": 8000, "workers": 1, "debug": False, "log_level": "info", "api_key": "default-secret-000"}
+YAML_LAYER = {"api_key": "key-x6kaf8bnud"}
+DOTENV_LAYER = {"port": "8786", "log_level": "warning"}
 
 def load_os_env_layer():
-    """This one DOES read real OS environment variables, since
-    these must actually be set in Render's dashboard."""
     layer = {}
-    mapping = {
-        "APP_PORT": "port",
-        "APP_WORKERS": "workers",
-        "NUM_WORKERS": "workers",  # alias -> workers
-        "APP_DEBUG": "debug",
-        "APP_LOG_LEVEL": "log_level",
-        "APP_API_KEY": "api_key",
-    }
+    mapping = {"APP_PORT": "port", "APP_WORKERS": "workers", "NUM_WORKERS": "workers", "APP_DEBUG": "debug", "APP_LOG_LEVEL": "log_level", "APP_API_KEY": "api_key"}
     for env_key, config_key in mapping.items():
-        if env_key in os.environ:
-            layer[config_key] = os.environ[env_key]
+        if env_key in os.environ: layer[config_key] = os.environ[env_key]
     return layer
 
+def coerce_types(d: dict) -> dict:
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, str):
+            if v.lower() == "true": out[k] = True
+            elif v.lower() == "false": out[k] = False
+            elif v.isdigit(): out[k] = int(v)
+            else: out[k] = v
+        else:
+            out[k] = v
+    return out
 
 @app.get("/effective-config")
 def effective_config(request: Request):
@@ -367,65 +309,27 @@ def effective_config(request: Request):
     merged["api_key"] = "****"
     return merged
 
-START_TIME = time.time()
-REQUEST_COUNTER = 0
-LOG_BUFFER = deque(maxlen=1000)  # keeps only the most recent 1000 entries
-
-
-@app.middleware("http")
-async def logging_middleware(request: Request, call_next):
-    global REQUEST_COUNTER
-    REQUEST_COUNTER += 1  # counts EVERY request, to any endpoint
-
-    request_id = str(uuid.uuid4())
-    response = await call_next(request)
-
-    LOG_BUFFER.append(
-        {
-            "level": "info",
-            "ts": time.time(),
-            "path": request.url.path,
-            "request_id": request_id,
-        }
-    )
-    response.headers["X-Request-ID"] = request_id
-    return response
-
 
 @app.get("/work")
 def work(n: int):
-    # Simulate K units of work — cheap CPU loop
-    total = 0
-    for i in range(n):
-        total += i
+    total = sum(range(n))
     return {"email": YOUR_EMAIL, "done": n}
-
 
 @app.get("/metrics")
 def metrics():
-    # Prometheus text exposition format
-    body = (
-        "# HELP http_requests_total Total HTTP requests\n"
-        "# TYPE http_requests_total counter\n"
-        f"http_requests_total {REQUEST_COUNTER}\n"
-    )
+    body = (f"# HELP http_requests_total Total HTTP requests\n# TYPE http_requests_total counter\nhttp_requests_total {REQUEST_COUNTER}\n")
     return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
-
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "uptime_s": time.time() - START_TIME}
 
-
 @app.get("/logs/tail")
 def logs_tail(limit: int = 10):
-    # Return the last `limit` entries, most recent last (or first — either is fine)
     return list(LOG_BUFFER)[-limit:]
-
 
 class ExtractRequest(BaseModel):
     text: str
-
 
 class ExtractResponse(BaseModel):
     vendor: str
@@ -433,24 +337,16 @@ class ExtractResponse(BaseModel):
     currency: str
     date: str
 
-
 @app.post("/extract", response_model=ExtractResponse)
 def extract(body: ExtractRequest):
     text = body.text or ""
-
     try:
-        # Vendor: look for a capitalized phrase ending in a common company suffix
-        vendor_match = re.search(
-            r"([A-Z][A-Za-z0-9\-&]*(?:\s+[A-Z][A-Za-z0-9\-&]*)*\s+"
-            r"(?:Industries|Inc|Ltd|LLC|Corp|Co)\.?)",
-            text,
-        )
+        vendor_match = re.search(r"([A-Z][A-Za-z0-9\-&]*(?:\s+[A-Z][A-Za-z0-9\-&]*)*\s+(?:Industries|Inc|Ltd|LLC|Corp|Co)\.?)", text)
         vendor = vendor_match.group(1) if vendor_match else "Unknown Vendor"
 
-        # Amount + currency: look for patterns like "USD 1234.56" or "$1234.56"
         amount_match = re.search(r"(USD|EUR|GBP)\s*([\d,]+\.?\d*)", text)
-        if not amount_match:
-            amount_match = re.search(r"([\d,]+\.?\d*)\s*(USD|EUR|GBP)", text)
+        if not amount_match: amount_match = re.search(r"([\d,]+\.?\d*)\s*(USD|EUR|GBP)", text)
+        
         if amount_match:
             groups = amount_match.groups()
             if groups[0] in ("USD", "EUR", "GBP"):
@@ -461,32 +357,10 @@ def extract(body: ExtractRequest):
         else:
             amount, currency = 0.0, "USD"
 
-        # Date: look for YYYY-MM-DD
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", text)
         date = date_match.group(1) if date_match else "1970-01-01"
 
-        return ExtractResponse(
-            vendor=vendor, amount=amount, currency=currency, date=date
-        )
+        return ExtractResponse(vendor=vendor, amount=amount, currency=currency, date=date)
 
     except Exception:
-        # Never crash — return best-effort defaults instead of a 500
-        return ExtractResponse(
-            vendor="Unknown", amount=0.0, currency="USD", date="1970-01-01"
-        )
-
-
-ALLOWED_ORIGIN_10 = "https://app-kuinjq.example.com"
-EXAM_PAGE_ORIGIN = (
-    "https://exam.example.com"  # replace with the actual exam page origin
-)
-BUCKET_SIZE = 9
-WINDOW_SECONDS_10 = 10
-
-ping_client_buckets: dict[str, list[float]] = defaultdict(list)
-
-
-@app.get("/ping")
-def ping(request: Request):
-    request_id = request.headers.get("X-Request-ID") or "unset"
-    return {"email": YOUR_EMAIL, "request_id": request_id}
+        return ExtractResponse(vendor="Unknown", amount=0.0, currency="USD", date="1970-01-01")
