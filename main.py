@@ -66,7 +66,7 @@ async def m3_rate_limiting_middleware(request: Request, call_next):
         ping_client_buckets[client_id].append(now)
 
     # /orders Rate Limiter (Legacy assignment)
-    elif path == "/orders":
+    elif path.startswith("/orders"):
         client_id = request.headers.get("X-Client-Id", "anonymous")
         now = time.time()
         bucket = client_buckets[client_id]
