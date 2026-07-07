@@ -41,6 +41,7 @@ START_TIME = time.time()
 REQUEST_COUNTER = 0
 LOG_BUFFER = deque(maxlen=1000)
 
+
 # ===========================================================
 # MIDDLEWARE LAYER 1: RATE LIMITER (Innermost - runs last on way in)
 # ===========================================================
@@ -53,13 +54,15 @@ async def m3_rate_limiting_middleware(request: Request, call_next):
         client_id = request.headers.get("X-Client-Id", "anonymous")
         now = time.time()
         bucket = ping_client_buckets[client_id]
-        
+
         # Prune older than 10 seconds
-        ping_client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS_10]
+        ping_client_buckets[client_id] = [
+            t for t in bucket if now - t < WINDOW_SECONDS_10
+        ]
 
         if len(ping_client_buckets[client_id]) >= BUCKET_SIZE:
             return JSONResponse(status_code=429, content={"error": "rate limited"})
-        
+
         ping_client_buckets[client_id].append(now)
 
     # /orders Rate Limiter (Legacy assignment)
@@ -67,7 +70,7 @@ async def m3_rate_limiting_middleware(request: Request, call_next):
         client_id = request.headers.get("X-Client-Id", "anonymous")
         now = time.time()
         bucket = client_buckets[client_id]
-        
+
         client_buckets[client_id] = [t for t in bucket if now - t < WINDOW_SECONDS]
 
         if len(client_buckets[client_id]) >= RATE_LIMIT:
@@ -79,6 +82,7 @@ async def m3_rate_limiting_middleware(request: Request, call_next):
         client_buckets[client_id].append(now)
 
     return await call_next(request)
+
 
 # ===========================================================
 # MIDDLEWARE LAYER 2: CORS POLICY (Middle)
@@ -99,19 +103,19 @@ async def m2_cors_middleware(request: Request, call_next):
                 headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
                 headers["Access-Control-Allow-Headers"] = "*"
             return PlainTextResponse("", status_code=204, headers=headers)
-            
+
         elif path in OPEN_CORS_PATHS:
             headers["Access-Control-Allow-Origin"] = "*"
             headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             headers["Access-Control-Allow-Headers"] = "*"
             return PlainTextResponse("", status_code=204, headers=headers)
-            
+
         elif origin == ALLOWED_ORIGIN:
             headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
             headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             headers["Access-Control-Allow-Headers"] = "*"
             return PlainTextResponse("", status_code=204, headers=headers)
-            
+
         return PlainTextResponse("", status_code=204)
 
     # Proceed to actual request
@@ -128,6 +132,7 @@ async def m2_cors_middleware(request: Request, call_next):
 
     return response
 
+
 # ===========================================================
 # MIDDLEWARE LAYER 3: REQUEST CONTEXT & LOGGING (Outermost - runs first)
 # ===========================================================
@@ -135,7 +140,7 @@ async def m2_cors_middleware(request: Request, call_next):
 async def m1_request_context_and_logging_middleware(request: Request, call_next):
     global REQUEST_COUNTER
     REQUEST_COUNTER += 1
-    
+
     start_time = time.time()
 
     # If incoming request has an ID, use it. Else, create one.
@@ -149,18 +154,21 @@ async def m1_request_context_and_logging_middleware(request: Request, call_next)
 
     # Always ensure X-Request-ID is embedded in response
     response.headers["X-Request-ID"] = req_id
-    
+
     if request.url.path != "/ping":
         response.headers["X-Process-Time"] = f"{process_time:.6f}"
 
-    LOG_BUFFER.append({
-        "level": "info",
-        "ts": time.time(),
-        "path": request.url.path,
-        "request_id": req_id,
-    })
+    LOG_BUFFER.append(
+        {
+            "level": "info",
+            "ts": time.time(),
+            "path": request.url.path,
+            "request_id": req_id,
+        }
+    )
 
     return response
+
 
 # ===========================================================
 # NEW ENDPOINT: /ping
@@ -205,7 +213,9 @@ def get_stats(values: str):
     try:
         numbers = [int(v.strip()) for v in values.split(",") if v.strip() != ""]
     except ValueError:
-        return JSONResponse(status_code=400, content={"error": "values must be integers"})
+        return JSONResponse(
+            status_code=400, content={"error": "values must be integers"}
+        )
     if not numbers:
         return JSONResponse(status_code=400, content={"error": "no values provided"})
 
@@ -227,17 +237,27 @@ _raw_key = os.environ.get(
 )
 IDP_PUBLIC_KEY = _raw_key.replace("\\n", "\n").strip()
 
+
 class VerifyRequest(BaseModel):
     token: str
+
 
 @app.post("/verify")
 def verify_token(body: VerifyRequest):
     try:
         claims = jwt.decode(
-            body.token, IDP_PUBLIC_KEY, algorithms=["RS256"],
-            issuer=EXPECTED_ISSUER, audience=EXPECTED_AUDIENCE,
+            body.token,
+            IDP_PUBLIC_KEY,
+            algorithms=["RS256"],
+            issuer=EXPECTED_ISSUER,
+            audience=EXPECTED_AUDIENCE,
         )
-        return {"valid": True, "email": claims.get("email"), "sub": claims.get("sub"), "aud": claims.get("aud")}
+        return {
+            "valid": True,
+            "email": claims.get("email"),
+            "sub": claims.get("sub"),
+            "aud": claims.get("aud"),
+        }
     except Exception:
         return JSONResponse(status_code=401, content={"valid": False})
 
@@ -247,8 +267,10 @@ class AnalyticsEvent(BaseModel):
     amount: float
     ts: int
 
+
 class AnalyticsRequest(BaseModel):
     events: list[AnalyticsEvent]
+
 
 @app.post("/analytics")
 def analytics(body: AnalyticsRequest, request: Request):
@@ -266,32 +288,57 @@ def analytics(body: AnalyticsRequest, request: Request):
         "total_events": len(events),
         "unique_users": len(set(e.user for e in events)),
         "revenue": sum(e.amount for e in events if e.amount > 0),
-        "top_user": max(per_user_pos_totals, key=per_user_pos_totals.get) if per_user_pos_totals else None,
+        "top_user": (
+            max(per_user_pos_totals, key=per_user_pos_totals.get)
+            if per_user_pos_totals
+            else None
+        ),
     }
 
 
-DEFAULTS = {"port": 8000, "workers": 1, "debug": False, "log_level": "info", "api_key": "default-secret-000"}
+DEFAULTS = {
+    "port": 8000,
+    "workers": 1,
+    "debug": False,
+    "log_level": "info",
+    "api_key": "default-secret-000",
+}
 YAML_LAYER = {"api_key": "key-x6kaf8bnud"}
 DOTENV_LAYER = {"port": "8786", "log_level": "warning"}
 
+
 def load_os_env_layer():
     layer = {}
-    mapping = {"APP_PORT": "port", "APP_WORKERS": "workers", "NUM_WORKERS": "workers", "APP_DEBUG": "debug", "APP_LOG_LEVEL": "log_level", "APP_API_KEY": "api_key"}
+    mapping = {
+        "APP_PORT": "port",
+        "APP_WORKERS": "workers",
+        "NUM_WORKERS": "workers",
+        "APP_DEBUG": "debug",
+        "APP_LOG_LEVEL": "log_level",
+        "APP_API_KEY": "api_key",
+    }
     for env_key, config_key in mapping.items():
-        if env_key in os.environ: layer[config_key] = os.environ[env_key]
+        if env_key in os.environ:
+            layer[config_key] = os.environ[env_key]
     return layer
+
 
 def coerce_types(d: dict) -> dict:
     out = {}
     for k, v in d.items():
         if isinstance(v, str):
-            if v.lower() == "true": out[k] = True
-            elif v.lower() == "false": out[k] = False
-            elif v.isdigit(): out[k] = int(v)
-            else: out[k] = v
+            if v.lower() == "true":
+                out[k] = True
+            elif v.lower() == "false":
+                out[k] = False
+            elif v.isdigit():
+                out[k] = int(v)
+            else:
+                out[k] = v
         else:
             out[k] = v
     return out
+
 
 @app.get("/effective-config")
 def effective_config(request: Request):
@@ -315,21 +362,26 @@ def work(n: int):
     total = sum(range(n))
     return {"email": YOUR_EMAIL, "done": n}
 
+
 @app.get("/metrics")
 def metrics():
-    body = (f"# HELP http_requests_total Total HTTP requests\n# TYPE http_requests_total counter\nhttp_requests_total {REQUEST_COUNTER}\n")
+    body = f"# HELP http_requests_total Total HTTP requests\n# TYPE http_requests_total counter\nhttp_requests_total {REQUEST_COUNTER}\n"
     return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "uptime_s": time.time() - START_TIME}
 
+
 @app.get("/logs/tail")
 def logs_tail(limit: int = 10):
     return list(LOG_BUFFER)[-limit:]
 
+
 class ExtractRequest(BaseModel):
     text: str
+
 
 class ExtractResponse(BaseModel):
     vendor: str
@@ -337,16 +389,21 @@ class ExtractResponse(BaseModel):
     currency: str
     date: str
 
+
 @app.post("/extract", response_model=ExtractResponse)
 def extract(body: ExtractRequest):
     text = body.text or ""
     try:
-        vendor_match = re.search(r"([A-Z][A-Za-z0-9\-&]*(?:\s+[A-Z][A-Za-z0-9\-&]*)*\s+(?:Industries|Inc|Ltd|LLC|Corp|Co)\.?)", text)
+        vendor_match = re.search(
+            r"([A-Z][A-Za-z0-9\-&]*(?:\s+[A-Z][A-Za-z0-9\-&]*)*\s+(?:Industries|Inc|Ltd|LLC|Corp|Co)\.?)",
+            text,
+        )
         vendor = vendor_match.group(1) if vendor_match else "Unknown Vendor"
 
         amount_match = re.search(r"(USD|EUR|GBP)\s*([\d,]+\.?\d*)", text)
-        if not amount_match: amount_match = re.search(r"([\d,]+\.?\d*)\s*(USD|EUR|GBP)", text)
-        
+        if not amount_match:
+            amount_match = re.search(r"([\d,]+\.?\d*)\s*(USD|EUR|GBP)", text)
+
         if amount_match:
             groups = amount_match.groups()
             if groups[0] in ("USD", "EUR", "GBP"):
@@ -360,7 +417,11 @@ def extract(body: ExtractRequest):
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", text)
         date = date_match.group(1) if date_match else "1970-01-01"
 
-        return ExtractResponse(vendor=vendor, amount=amount, currency=currency, date=date)
+        return ExtractResponse(
+            vendor=vendor, amount=amount, currency=currency, date=date
+        )
 
     except Exception:
-        return ExtractResponse(vendor="Unknown", amount=0.0, currency="USD", date="1970-01-01")
+        return ExtractResponse(
+            vendor="Unknown", amount=0.0, currency="USD", date="1970-01-01"
+        )
