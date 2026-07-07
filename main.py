@@ -298,7 +298,7 @@ def analytics(body: AnalyticsRequest, request: Request):
 
 DEFAULTS = {
     "port": 8000,
-    "workers": 1,
+    "workers": 14,
     "debug": False,
     "log_level": "info",
     "api_key": "default-secret-000",
